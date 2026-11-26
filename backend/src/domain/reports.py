@@ -23,18 +23,28 @@ def handover(rows, references, options):
     return cells
 
 
-def assemble(cells, details, scores, references):
+def assemble(cells, details, scores, references, withdrawn=None):
+    withdrawn = withdrawn or {}
     ready = sum(row['proposed_value'] is not None for row in cells)
     compared = sum(row['compared'] for row in scores)
     frozen = [{'shade_class': shade, 'field': field, 'training_rows': len(ref.rows),
-               'training_scale': ref.scales[field], 'training_median': ref.medians[field]}
+               'training_scale': ref.scales[field], 'training_median': ref.medians[field],
+               'withdrawn_batches': '、'.join(ref.withdrawn) or None}
               for shade, ref in sorted(references.items()) for field in FIELDS]
+    dropped = {batch for batches in withdrawn.values() for batch in batches}
+    withheld = sorted(shade for shade, ref in references.items() if not ref.usable)
+    summary = (f'{len(details)} 个留出读数单元完成遮挡，其中 {compared} 个可进行同口径对比。'
+               f'{len(cells)} 个待补单元中，{ready} 个有建议值，{len(cells)-ready} 个需人工补测。')
+    if dropped:
+        summary += f'本次计算已剔除 {len(dropped)} 个批次的训练读数。'
+    if withheld:
+        summary += '以下遮阳网档位同档训练读数不足，已改派人工补测：' + '、'.join(withheld) + '。'
     return {
-        'summary': f'{len(details)} 个留出读数单元完成遮挡，其中 {compared} 个可进行同口径对比。'
-                   f'{len(cells)} 个待补单元中，{ready} 个有建议值，{len(cells)-ready} 个需人工补测。',
+        'summary': summary,
         'metrics': {'留出遮挡单元': len(details), '有效配对覆盖率': round(compared / len(details), 6),
                     '可建议单元': ready, '待人工补测单元': len(cells) - ready},
         'warnings': ['遮挡回测评估单字段随机缺测，设备断连造成的多列缺测可能没有足够近邻。'],
+        'withdrawals': {key: sorted(value) for key, value in sorted(withdrawn.items()) if value},
         'tables': [
             make_table('missing_cells', '缺测建议交班', ['reading_id', 'batch_id', 'field', 'shade_class',
                        'proposed_value', 'donors', 'nearest_distance', 'reason'], cells),
@@ -42,6 +52,6 @@ def assemble(cells, details, scores, references):
             make_table('masked_holdout', '留出遮挡明细', ['reading_id', 'batch_id', 'field', 'actual',
                        'predicted', 'baseline', 'reason'], details),
             make_table('frozen_reference', '训练尺度与基准', ['shade_class', 'field', 'training_rows',
-                       'training_scale', 'training_median'], frozen),
+                       'training_scale', 'training_median', 'withdrawn_batches'], frozen),
         ],
     }

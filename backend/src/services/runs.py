@@ -5,24 +5,54 @@ from sqlalchemy import select
 
 from src.constants.workflow import Decision, Role, RunStatus
 from src.domain.project import SPEC
+from src.domain.withdrawals import status
+from src.models.dataset import Dataset
 from src.models.review import Review
 from src.models.run import Run
 from src.services.audit import record
 from src.services.catalog import get_dataset
 from src.services.queue import notify_worker
+from src.services.withdrawals import current_state
 from src.utils.time import utc_stamp
 
 
-def run_info(run, review):
+def applied_state(run):
+    return (run.result or {}).get('withdrawals', {})
+
+
+def delivery_state(session, run):
+    if not run.result:
+        return {}
+    dataset = session.get(Dataset, run.dataset_id)
+    applied = applied_state(run)
+    current = current_state(session, dataset)
+    blocked = status(applied, current)
+    state = {}
+    for shade in sorted({row['shade_class'] for row in dataset.rows if row['partition'] == 'pending'}):
+        state[shade] = blocked.get(shade) or {
+            'applied_withdrawals': applied.get(shade, []),
+            'current_withdrawals': current.get(shade, []),
+            'deliverable': True, 'reason': None}
+    state.update({shade: item for shade, item in blocked.items() if shade not in state})
+    return state
+
+
+def run_info(run, review, delivery=None):
     fields = ('id', 'label', 'dataset_id', 'created_at', 'status', 'settings')
-    return {**{key: getattr(run, key) for key in fields}, 'decision': review.decision if review else None}
+    delivery = delivery or {}
+    return {**{key: getattr(run, key) for key in fields}, 'decision': review.decision if review else None,
+            'withdrawals': {shade: item['current_withdrawals'] for shade, item in delivery.items()
+                            if item['current_withdrawals']},
+            'delivery': delivery,
+            'deliverable': all(item['deliverable'] for item in delivery.values()) if delivery else None}
 
 
 def list_runs(session, actor):
     statement = select(Run, Review).outerjoin(Review, Run.id == Review.run_id).order_by(Run.id.desc()).limit(100)
     if actor.role == Role.VIEWER:
         statement = statement.where(Review.decision == Decision.APPROVED)
-    return [run_info(run, review) for run, review in session.execute(statement)]
+    return [run_info(run, review, delivery_state(session, run) if run.result else {})
+            for run, review in session.execute(statement)]
 
 
 def get_run(session, run_id, actor):
@@ -57,14 +87,37 @@ def create_run(session, payload, actor):
     record(session, 'run.queued', run.id, actor.id)
     session.commit()
     notify_worker()
-    return run_info(run, None)
+    return run_info(run, None, {})
 
 
-def export_table(session, run_id, key, actor):
+def export_table(session, run_id, key, actor, shade_class=None):
     run, review = get_run(session, run_id, actor)
     if review is None or review.decision != Decision.APPROVED:
         raise HTTPException(409, '复核通过后可下载正式 CSV')
-    for table in run.result['tables']:
-        if table['key'] == key:
-            return table
-    raise LookupError('找不到结果表')
+    table = next((item for item in run.result['tables'] if item['key'] == key), None)
+    if table is None:
+        raise LookupError('找不到结果表')
+    delivery = delivery_state(session, run)
+    if not delivery:
+        return table, []
+    blocked = sorted(shade for shade, state in delivery.items() if not state['deliverable'])
+    if shade_class is not None:
+        state = delivery.get(shade_class)
+        if state is not None and not state['deliverable']:
+            raise HTTPException(409, state['reason'])
+        if 'shade_class' not in table['columns']:
+            raise HTTPException(409, '该表按字段汇总，无法只导出单档；请待该档重新计算完成后下载')
+        if not any(row.get('shade_class') == shade_class for row in table['rows']):
+            raise LookupError(f'结果表中没有遮阳网档位 {shade_class}')
+        rows = [row for row in table['rows'] if row.get('shade_class') == shade_class]
+        return {**table, 'rows': rows}, blocked
+    if 'shade_class' in table['columns']:
+        # Unaffected classes keep downloading the shift sheet normally.
+        rows = [row for row in table['rows'] if row.get('shade_class') not in blocked]
+        if not rows:
+            raise HTTPException(409, '该档旧建议已停发：' + (delivery[blocked[0]]['reason'] if blocked
+                                                        else '暂无可下载档位'))
+        return {**table, 'rows': rows}, blocked
+    if blocked:
+        raise HTTPException(409, '该表涉及全部档位，已停发的档位需等重新计算完成后再下载')
+    return table, blocked

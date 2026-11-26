@@ -18,7 +18,8 @@ def evaluate(rows, references, options):
         target = keys[i % len(keys)]
         masked = {**original, target: None}
         candidate = predict(masked, target, references, options['neighbors'], options['min_anchors'])
-        baseline = references[masked['shade_class']].medians[target] if candidate.value is not None else None
+        reference = references.get(masked['shade_class'])
+        baseline = reference.medians[target] if candidate.value is not None and reference is not None else None
         details.append({'reading_id': original['reading_id'], 'batch_id': original['batch_id'],
                         'field': target, 'actual': original[target], 'predicted': candidate.value,
                         'baseline': baseline, 'reason': candidate.reason})

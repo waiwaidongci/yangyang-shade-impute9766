@@ -3,6 +3,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.constants.workflow import RunStatus
 
 
+class DeliveryState(BaseModel):
+    applied_withdrawals: list[str]
+    current_withdrawals: list[str]
+    deliverable: bool
+    reason: str | None
+
+
 class RunCreate(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     label: str = Field(min_length=2, max_length=140)
@@ -18,3 +25,6 @@ class RunInfo(BaseModel):
     status: RunStatus
     settings: dict
     decision: str | None
+    withdrawals: dict[str, list[str]]
+    delivery: dict[str, DeliveryState]
+    deliverable: bool | None

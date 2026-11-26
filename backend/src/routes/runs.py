@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from src.controllers.dependencies import Actor, Admin, Db, Writer
 from src.controllers.report import report_csv, report_detail
@@ -30,5 +30,5 @@ def review(run_id: int, payload: ReviewCreate, session: Db, actor: Admin):
 
 
 @router.get('/{run_id}/export/{key}')
-def export(run_id: int, key: str, session: Db, actor: Actor):
-    return report_csv(session, run_id, key, actor)
+def export(run_id: int, key: str, session: Db, actor: Actor, shade_class: str | None = Query(None)):
+    return report_csv(session, run_id, key, actor, shade_class)
